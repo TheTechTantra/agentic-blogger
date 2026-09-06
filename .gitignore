@@ -1,0 +1,70 @@
+# Environment
+.env
+.env.local
+*.storage
+token.json
+client_secret*.json
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Data volumes
+data/vault/*
+data/postgres/*
+data/mlartifacts/*
+data/assets/*
+!data/vault/.gitkeep
+!data/postgres/.gitkeep
+!data/mlartifacts/.gitkeep
+!data/assets/.gitkeep
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+venv/
+ENV/
+env/
+.venv
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# MLflow
+mlruns/
+.mlflow/
+
+# Git
+.git
+
+# OS
+.DS_Store
+Thumbs.db

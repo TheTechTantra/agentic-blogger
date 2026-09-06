@@ -1,0 +1,70 @@
+# LLM model routing and fallbacks
+
+version: 1
+
+defaults:
+  timeout_s: 600
+  max_retries: 3
+
+providers:
+  anthropic:
+    kind: anthropic
+    api_key_secret: ANTHROPIC_API_KEY
+
+  openai:
+    kind: openai
+    api_key_secret: OPENAI_API_KEY
+
+  gemini:
+    kind: gemini
+    api_key_secret: GEMINI_API_KEY
+
+  ollama:
+    kind: ollama
+    base_url: "http://host.docker.internal:11434"
+
+roles:
+  research_synth:
+    model: "anthropic:claude-haiku-4-5"
+    max_tokens: 8000
+    effort: low
+
+  outline:
+    model: "anthropic:claude-haiku-4-5"
+    max_tokens: 4000
+    effort: low
+
+  draft:
+    model: "anthropic:claude-opus-5"
+    max_tokens: 32000
+    effort: high
+
+  factcheck:
+    model: "anthropic:claude-opus-5"
+    max_tokens: 16000
+    effort: high
+
+  seo:
+    model: "anthropic:claude-haiku-4-5"
+    max_tokens: 4000
+    effort: low
+
+  script:
+    model: "anthropic:claude-haiku-4-5"
+    max_tokens: 8000
+    effort: low
+
+  search_tool:
+    model: "anthropic:claude-haiku-4-5"
+    max_tokens: 8000
+    effort: low
+
+fallbacks:
+  "anthropic:claude-opus-5":
+    - "anthropic:claude-sonnet-5"
+
+  "anthropic:claude-haiku-4-5":
+    - "ollama:qwen3.5:9b"
+
+search:
+  provider: anthropic_server_tools

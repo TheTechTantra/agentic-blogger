@@ -1,0 +1,59 @@
+# Token pricing per 1M tokens (input/output/cache_read/cache_write)
+# Cost is a local estimate, never billing truth
+# Rates as of 2026-09-05
+
+anthropic:
+  claude-opus-5:
+    input_per_1m: 5.00
+    output_per_1m: 25.00
+    cache_read_per_1m: 1.25
+    cache_write_per_1m: 6.25
+
+  claude-sonnet-5:
+    input_per_1m: 3.00
+    output_per_1m: 15.00
+    cache_read_per_1m: 0.75
+    cache_write_per_1m: 3.75
+
+  claude-haiku-4-5:
+    input_per_1m: 1.00
+    output_per_1m: 5.00
+    cache_read_per_1m: 0.25
+    cache_write_per_1m: 1.25
+
+openai:
+  gpt-4-turbo:
+    input_per_1m: 10.00
+    output_per_1m: 30.00
+    cache_read_per_1m: 5.00
+    cache_write_per_1m: 10.00
+
+  gpt-4o:
+    input_per_1m: 5.00
+    output_per_1m: 15.00
+    cache_read_per_1m: 0.00
+    cache_write_per_1m: 0.00
+
+google:
+  gemini-2.0-flash:
+    input_per_1m: 0.075
+    output_per_1m: 0.30
+    cache_read_per_1m: 0.019
+    cache_write_per_1m: 0.038
+
+ollama:
+  qwen3.5:9b:
+    input_per_1m: 0.00
+    output_per_1m: 0.00
+    cache_read_per_1m: 0.00
+    cache_write_per_1m: 0.00
+
+search:
+  anthropic_server_tools:
+    per_search: 0.00  # included in LLM call cost
+
+  tavily:
+    per_search: 0.01  # approx
+
+  searxng:
+    per_search: 0.00  # self-hosted

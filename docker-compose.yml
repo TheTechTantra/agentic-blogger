@@ -1,0 +1,155 @@
+version: "3.9"
+
+services:
+  tinydb:
+    build:
+      context: ./TinyDBService
+      args:
+        GIT_COMMIT: local
+    image: agentic-blogger/tinydb:local
+    container_name: agentic-blogger-tinydb
+    networks:
+      - blogger-net
+    ports:
+      - "127.0.0.1:28080:28080"
+    environment:
+      TINYDB_ENC_KEY: "${TINYDB_ENC_KEY:?TINYDB_ENC_KEY not set — export it or set it in .env}"
+      SECRET_STORE_TOKEN: "${SECRET_STORE_TOKEN:-}"
+      TINYDB_PATH: "/data/db.json.enc"
+      SERVICE_MODE: "credentials"
+      APP_VERSION: "local"
+    volumes:
+      - "${VAULT_DIR:-./data/vault}:/data"
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: "0.25"
+          pids: 64
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:28080/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: agentic-blogger-postgres
+    networks:
+      - blogger-net
+    ports:
+      - "127.0.0.1:25432:5432"
+    environment:
+      POSTGRES_USER: agentic_blogger
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD not set}"
+      POSTGRES_INITDB_ARGS: "-c shared_preload_libraries=pgcrypto"
+    volumes:
+      - "${POSTGRES_DATA:-./data/postgres}:/var/lib/postgresql/data"
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: "0.5"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agentic_blogger"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  mlflow:
+    build:
+      context: ./services/mlflow
+      args:
+        PYTHON_VERSION: "3.12"
+    image: agentic-blogger/mlflow:local
+    container_name: agentic-blogger-mlflow
+    networks:
+      - blogger-net
+    ports:
+      - "127.0.0.1:25000:5000"
+    environment:
+      POSTGRES_MLFLOW_DSN: "postgresql+psycopg2://agentic_blogger:${POSTGRES_PASSWORD:?}@postgres:5432/mlflow"
+      MLFLOW_DEFAULT_ARTIFACT_ROOT: "/mlartifacts"
+      MLFLOW_TRACKING_URI: "http://mlflow:5000"
+    volumes:
+      - "${MLFLOW_ARTIFACTS:-./data/mlartifacts}:/mlartifacts"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      tinydb:
+        condition: service_healthy
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "1"
+
+  orchestrator:
+    build:
+      context: .
+      dockerfile: services/orchestrator/Dockerfile
+    image: agentic-blogger/orchestrator:local
+    container_name: agentic-blogger-orchestrator
+    networks:
+      - blogger-net
+    environment:
+      DATABASE_URL: "postgresql+psycopg2://agentic_blogger:${POSTGRES_PASSWORD:?}@postgres:5432/blogger"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?}"
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: blogger
+      POSTGRES_USER: agentic_blogger
+      TINYDB_HOST: tinydb
+      TINYDB_PORT: "28080"
+      SECRET_STORE_TOKEN: "${SECRET_STORE_TOKEN:-}"
+      MLFLOW_TRACKING_URI: "http://mlflow:5000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      tinydb:
+        condition: service_healthy
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: "2"
+
+  telegram:
+    build:
+      context: .
+      dockerfile: services/telegram/Dockerfile
+    image: agentic-blogger/telegram:local
+    container_name: agentic-blogger-telegram
+    networks:
+      - blogger-net
+    environment:
+      DATABASE_URL: "postgresql+psycopg2://agentic_blogger:${POSTGRES_PASSWORD:?}@postgres:5432/blogger"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?}"
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: blogger
+      POSTGRES_USER: agentic_blogger
+      TINYDB_HOST: tinydb
+      TINYDB_PORT: "28080"
+      SECRET_STORE_TOKEN: "${SECRET_STORE_TOKEN:-}"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      tinydb:
+        condition: service_healthy
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: "0.5"
+
+networks:
+  blogger-net:
+    name: ${DOCKER_NETWORK:-agentic-blogger-net}
+    driver: bridge
