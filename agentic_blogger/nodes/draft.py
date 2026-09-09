@@ -9,6 +9,9 @@ from agentic_blogger.db import repo
 from agentic_blogger.llm.callbacks import track_llm_call
 from agentic_blogger.llm.registry import build_llm, with_resilience
 from agentic_blogger.llm.text import extract_text
+from agentic_blogger.nodes.attribution import explainer_contract
+from agentic_blogger.prompts import render
+from agentic_blogger.prompts import specs as S
 
 logger = logging.getLogger(__name__)
 
@@ -23,22 +26,27 @@ def _format_outline(outline: dict) -> str:
 def draft_node(state: dict) -> dict:
     job_id = state["job_id"]
     topic = state["topic"]
-    brief = (state.get("research_brief") or {}).get("brief", "")
+    research = state.get("research_brief") or {}
+    brief = research.get("brief", "")
+    primary_source = research.get("primary_source") or {}
     outline = state.get("outline_plan") or {}
     spec = role_spec("draft")
 
     llm = with_resilience(build_llm("draft"), "draft")
 
     title = (outline.get("title_options") or [topic])[0]
-    prompt = (
-        f"Write a complete, well-researched blog post about: {topic}\n\n"
-        f"Use this title: {title}\n\n"
-        f"Follow this outline:\n{_format_outline(outline)}\n\n"
-        f"Research brief to draw on:\n{brief}\n\n"
-        "Write the full post in Markdown (headings, no title heading itself — "
-        "the title is set separately). Aim for 1200-1800 words. Be concrete, "
-        "avoid filler, and don't fabricate specifics not supported by the brief."
-    )
+
+    # Placed before the outline and brief on purpose: the attribution contract
+    # governs how everything after it may be used.
+    contract = f"{explainer_contract(primary_source)}\n\n" if primary_source else ""
+
+    prompt = render(S.DRAFT_USER, content={
+        "contract": contract,
+        "topic": topic,
+        "title": title,
+        "outline_block": _format_outline(outline),
+        "brief": brief,
+    })
 
     with track_llm_call(job_id, "draft", "draft", spec["model"]) as record:
         response = llm.invoke([HumanMessage(content=prompt)])

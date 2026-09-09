@@ -12,14 +12,9 @@ from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
-from tenacity import (
-    before_sleep_log,
-    retry,
-    retry_if_exception,
-    stop_after_attempt,
-    wait_exponential_jitter,
-)
+from tenacity import retry
 
+from agentic_blogger.resilience import tenacity_kwargs
 from agentic_blogger.secrets.store import SecretStore
 
 logger = logging.getLogger(__name__)
@@ -84,13 +79,10 @@ def _find_by_beacon(service, blog_id: str, job_id: str, title: str) -> dict | No
     return None
 
 
-@retry(
-    retry=retry_if_exception(_is_retryable),
-    stop=stop_after_attempt(5),
-    wait=wait_exponential_jitter(initial=2, max=30),
-    before_sleep=before_sleep_log(logger, logging.WARNING),
-    reraise=True,
-)
+# Attempts and backoff come from the shared policy; the _is_retryable
+# predicate stays here because it is specific to this call site — an expired
+# OAuth grant must never be retried, and only certain HTTP statuses should be.
+@retry(**tenacity_kwargs(_is_retryable, logger))
 def publish_draft(job_id: str, title: str, html: str, labels: list[str]) -> dict:
     """Insert (or adopt, via reconcile) a Blogger draft post. Returns
     {"remote_post_id", "remote_url", "state": "DRAFT"}.

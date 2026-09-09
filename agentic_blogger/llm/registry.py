@@ -11,6 +11,7 @@ from langchain.chat_models import init_chat_model
 from langchain_core.runnables import Runnable
 
 from agentic_blogger.config.loader import fallback_specs, load_models, role_spec
+from agentic_blogger.resilience import runnable_retry_kwargs
 from agentic_blogger.secrets.store import SecretStore
 
 logger = logging.getLogger(__name__)
@@ -101,11 +102,11 @@ def with_resilience(llm: Runnable, role: str) -> Runnable:
     max_tokens = spec.get("max_tokens", 4096)
     effort = spec.get("effort", "low")
 
-    defaults = load_models().get("defaults", {})
-    llm = llm.with_retry(
-        stop_after_attempt=defaults.get("max_retries", 3),
-        wait_exponential_jitter=True,
-    )
+    # Shared policy from config/models.yaml `resilience:`. LangChain's
+    # .with_retry() exposes only an attempt count and a jitter flag, so the
+    # backoff bounds in that block apply on the tenacity call sites and not
+    # here — see agentic_blogger/resilience.py.
+    llm = llm.with_retry(**runnable_retry_kwargs())
 
     fallback_llms = []
     for fb in fallback_specs(spec["model"]):

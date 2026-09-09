@@ -1,4 +1,4 @@
-.PHONY: build up down logs ps shell psql clean nuke smoke push help migrate seed
+.PHONY: build up down logs ps shell psql clean nuke smoke push help migrate seed register-prompts export-prompts
 
 help:
 	@echo "Targets:"
@@ -12,6 +12,8 @@ help:
 	@echo "  migrate     - alembic upgrade head"
 	@echo "  seed        - ./scripts/seed_secrets.sh"
 	@echo "  smoke       - Run smoke tests (steps 7-10 of build order)"
+	@echo "  register-prompts - Seed the MLflow Prompt Registry (bootstrap)"
+	@echo "  export-prompts   - Back up the registry to prompts_backup/"
 	@echo "  clean       - Remove containers and volumes"
 	@echo "  nuke        - Clean + rm data/ directory"
 	@echo "  push        - ERROR: pushing images violates requirement 7"
@@ -45,9 +47,18 @@ seed:
 
 smoke:
 	@echo "Running smoke tests..."
+	docker compose run --rm orchestrator python -m scripts.smoke_prompts
 	docker compose run --rm orchestrator python -m scripts.smoke_llm
 	docker compose run --rm orchestrator python -m scripts.smoke_search
 	docker compose run --rm orchestrator python -m scripts.smoke_blogger
+
+register-prompts:
+	@echo "Seeding the MLflow Prompt Registry (creates new versions)..."
+	docker compose run --rm orchestrator python -m scripts.register_prompts
+
+export-prompts:
+	@echo "Backing up the prompt registry to prompts_backup/ ..."
+	docker compose run --rm orchestrator python -m scripts.export_prompts
 
 clean:
 	docker compose down -v

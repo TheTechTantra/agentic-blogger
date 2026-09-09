@@ -12,6 +12,7 @@ from decimal import Decimal
 
 from agentic_blogger.db import repo
 from agentic_blogger.llm.pricing import cost_from_usage
+from agentic_blogger.prompts import drain
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +40,8 @@ def track_llm_call(job_id: str, node_name: str, role: str, model_key: str):
         latency_ms = int((time.monotonic() - started) * 1000)
         repo.record_node_run(
             job_id, node_name, provider=provider, model=model, role=role,
-            latency_ms=latency_ms, error_class=type(e).__name__, error_message=str(e),
+            latency_ms=latency_ms, prompts=drain(),
+            error_class=type(e).__name__, error_message=str(e),
         )
         raise
     else:
@@ -49,13 +51,19 @@ def track_llm_call(job_id: str, node_name: str, role: str, model_key: str):
         cost = cost_from_usage(provider, model, usage) if usage else Decimal("0")
         tokens_in = usage.get("input_tokens", 0)
         tokens_out = usage.get("output_tokens", 0)
+        # drain() attributes every prompt resolved since the last node_run to
+        # this one — nodes render before invoking, so this is the whole set the
+        # call actually used.
+        prompts = drain()
         repo.record_node_run(
             job_id, node_name, provider=provider, model=model, role=role,
             tokens_in=tokens_in, tokens_out=tokens_out, cost_usd=cost, latency_ms=latency_ms,
+            prompts=prompts,
         )
         if cost:
             repo.add_job_cost(job_id, cost, tokens_in, tokens_out)
         logger.info(
-            "node=%s role=%s tokens_in=%s tokens_out=%s cost_usd=%s latency_ms=%s",
+            "node=%s role=%s tokens_in=%s tokens_out=%s cost_usd=%s latency_ms=%s prompts=%s",
             node_name, role, tokens_in, tokens_out, cost, latency_ms,
+            ",".join(f"{p['name']}@v{p['version']}" for p in prompts) or "-",
         )

@@ -7,7 +7,9 @@ from langchain_core.messages import HumanMessage
 from agentic_blogger.config.loader import role_spec
 from agentic_blogger.llm.callbacks import track_llm_call
 from agentic_blogger.llm.registry import build_llm, with_resilience
-from agentic_blogger.nodes.schemas import FactCheckReport
+from agentic_blogger.nodes.schemas import FactCheckReport, bound
+from agentic_blogger.prompts import render
+from agentic_blogger.prompts import specs as S
 
 logger = logging.getLogger(__name__)
 
@@ -20,17 +22,10 @@ def factcheck_node(state: dict) -> dict:
     brief = (state.get("research_brief") or {}).get("brief", "")
     spec = role_spec("factcheck")
 
-    llm = build_llm("factcheck").with_structured_output(FactCheckReport, include_raw=True)
+    llm = build_llm("factcheck").with_structured_output(bound(FactCheckReport), include_raw=True)
     llm = with_resilience(llm, "factcheck")
 
-    prompt = (
-        "Fact-check the following blog post draft against the research brief. "
-        "List every checkable factual claim with a verdict: 'supported' (backed "
-        "by the brief), 'unsupported' (not backed by the brief, but not "
-        "necessarily wrong), or 'contradicted' (conflicts with the brief). For "
-        "unsupported/contradicted claims, suggest a fix.\n\n"
-        f"--- RESEARCH BRIEF ---\n{brief}\n\n--- DRAFT ---\n{draft}"
-    )
+    prompt = render(S.FACTCHECK_USER, content={"brief": brief, "draft": draft})
 
     with track_llm_call(job_id, "factcheck", "factcheck", spec["model"]) as record:
         result = llm.invoke([HumanMessage(content=prompt)])

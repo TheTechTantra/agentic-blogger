@@ -1,5 +1,11 @@
-"""MLflow wiring — fail-open. An MLflow outage must degrade to no traces,
-never a failed content job."""
+"""MLflow wiring for TRACING — fail-open. An MLflow outage must degrade to no
+traces, never a failed content job.
+
+That rule covers this module only. Prompt loading (agentic_blogger/prompts)
+also talks to MLflow but hard-fails by design: the registry is the sole source
+of prompt text, so an outage there means the job would run on wrong or absent
+instructions rather than merely lose its trace. Tracing degrades silently;
+prompts do not."""
 
 import logging
 import os

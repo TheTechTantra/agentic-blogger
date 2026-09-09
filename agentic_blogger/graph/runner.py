@@ -10,6 +10,8 @@ import logging
 from agentic_blogger.db import repo
 from agentic_blogger.nodes.publish import JobBlocked
 from agentic_blogger.observability.mlflow_setup import log_job_metrics, start_job_run
+from agentic_blogger.prompts import PromptRegistryError
+from agentic_blogger.prompts.preflight import check_all
 
 logger = logging.getLogger(__name__)
 
@@ -37,16 +39,32 @@ class JobRunner:
 
         with start_job_run(job_id, resumed=resumed):
             try:
+                # Before any LLM spend: prove the registry can serve every
+                # prompt this pipeline needs, with the variables the nodes
+                # supply. A prompt edited to rename a variable would otherwise
+                # sail through research on Opus and die at draft.
+                check_all()
+
                 if resumed:
                     final_state = self.compiled_graph.invoke(None, config=config)
                 else:
                     initial_state = {
                         "job_id": job_id,
                         "topic": topic,
+                        # Present only for /url jobs; research branches on it.
+                        "source_url": (claimed.get("config_snapshot") or {}).get("source_url"),
                         "sources": [],
                         "revision_count": 0,
                     }
                     final_state = self.compiled_graph.invoke(initial_state, config=config)
+            except PromptRegistryError as e:
+                # Registry is the only source of prompt text and has no
+                # fallback by design: a job that cannot read its prompts is
+                # terminal, not retryable. Fix the registry, re-create the job.
+                logger.error("job=%s FAILED on prompt registry: %s", job_id, e)
+                repo.mark_job_state(job_id, "FAILED", failure_class="PromptRegistryError",
+                                     failure_reason=str(e))
+                return True
             except JobBlocked as e:
                 logger.error("job=%s BLOCKED: %s", job_id, e)
                 repo.mark_job_state(job_id, "BLOCKED", failure_class="JobBlocked", failure_reason=str(e))

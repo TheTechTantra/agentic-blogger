@@ -34,7 +34,9 @@ qrcode>=7.4.0,<8.0.0
 python-telegram-bot==21.8
 
 # === OBSERVABILITY ===
-mlflow==2.18.0
+# 3.x required for the Prompt Registry (mlflow.genai.load_prompt / register_prompt);
+# it did not exist before 2.21.0 and the genai namespace landed in 3.1.
+mlflow==3.16.0
 pydantic==2.9.2
 
 # === UTILITIES ===

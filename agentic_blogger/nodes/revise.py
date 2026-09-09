@@ -11,6 +11,8 @@ from agentic_blogger.db import repo
 from agentic_blogger.llm.callbacks import track_llm_call
 from agentic_blogger.llm.registry import build_llm, with_resilience
 from agentic_blogger.llm.text import extract_text
+from agentic_blogger.prompts import render
+from agentic_blogger.prompts import specs as S
 
 logger = logging.getLogger(__name__)
 
@@ -25,12 +27,7 @@ def revise_node(state: dict) -> dict:
 
     flagged = [f for f in findings if f.get("verdict") in ("unsupported", "contradicted")]
 
-    prompt = (
-        "Revise the following blog post draft to address these fact-check findings. "
-        "Fix or soften unsupported/contradicted claims per the suggested fix. Keep "
-        "everything else intact. Return the full revised Markdown post.\n\n"
-        f"--- FINDINGS ---\n{flagged}\n\n--- DRAFT ---\n{draft}"
-    )
+    prompt = render(S.REVISE_USER, content={"findings": flagged, "draft": draft})
 
     llm = with_resilience(build_llm("draft"), "draft")
     with track_llm_call(job_id, "revise", "draft", spec["model"]) as record:

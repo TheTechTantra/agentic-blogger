@@ -14,11 +14,15 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
 from agentic_blogger.config.loader import load_models
+from agentic_blogger.config.loader import prompts_spec
 from agentic_blogger.db import repo
 from agentic_blogger.secrets.store import SecretStore
 from agentic_blogger.security import totp
 
 _TOTP_CODE_RE = re.compile(r"\d{6}")
+# Deliberately anchored: only a leading http(s) URL turns a message into a
+# URL-sourced job. A URL mentioned mid-sentence is part of the topic text.
+_URL_RE = re.compile(r"^https?://\S+$")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -69,6 +73,33 @@ def restricted(func):
     return wrapper
 
 
+async def _queue(update: Update, topic_text: str, source_url: str | None) -> None:
+    result = repo.create_topic_and_job(
+        topic_text,
+        source="telegram",
+        requested_by=str(update.effective_user.id),
+        config_snapshot={
+            "config_version": "v1",
+            # Which prompt alias this job was queued against. Not the resolved
+            # version — that is per node (alias resolution happens at each
+            # node), and lands on node_runs.prompts_json.
+            "prompt_alias": prompts_spec()["alias"],
+            "telegram_chat_id": update.effective_chat.id,
+        },
+        source_url=source_url,
+    )
+    if result["reused"]:
+        await update.message.reply_text(
+            f"Already queued as job {result['job_id']} (state={result['state']})"
+        )
+        return
+    prefix = f"Queued from URL. job_id={result['job_id']}" if source_url \
+        else f"Queued. job_id={result['job_id']}"
+    await update.message.reply_text(
+        f"{prefix}\nUse /status {result['job_id']} to check progress."
+    )
+
+
 @restricted
 async def cmd_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # restricted() has already stripped the leading TOTP code and command
@@ -79,23 +110,37 @@ async def cmd_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Usage: /topic <text>")
         return
 
-    result = repo.create_topic_and_job(
-        text,
-        source="telegram",
-        requested_by=str(update.effective_user.id),
-        config_snapshot={
-            "config_version": "v1",
-            "telegram_chat_id": update.effective_chat.id,
-        },
-    )
-    if result["reused"]:
-        await update.message.reply_text(
-            f"Already queued as job {result['job_id']} (state={result['state']})"
-        )
-    else:
-        await update.message.reply_text(
-            f"Queued. job_id={result['job_id']}\nUse /status {result['job_id']} to check progress."
-        )
+    # A bare URL pasted with no command means "write about this article" —
+    # route it through the URL path rather than searching for the URL string.
+    first, _, rest = text.partition(" ")
+    if _URL_RE.match(first):
+        await _queue(update, rest.strip() or first, first)
+        return
+
+    await _queue(update, text, None)
+
+
+@restricted
+async def cmd_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/url <link> [angle] — the page is fetched by Anthropic's server-side
+    web_fetch tool inside the research node. Nothing is downloaded here; the
+    bot only records the URL."""
+    if not context.args:
+        await update.message.reply_text("Usage: /url <link> [angle]")
+        return
+
+    url = context.args[0].strip()
+    if not _URL_RE.match(url):
+        await update.message.reply_text("First argument must be an http(s) URL.")
+        return
+    # web_fetch rejects URLs over 250 characters with url_too_long. Catching it
+    # here costs nothing; catching it in the research node costs a job run.
+    if len(url) > 250:
+        await update.message.reply_text("URL too long (max 250 characters).")
+        return
+
+    angle = " ".join(context.args[1:]).strip()
+    await _queue(update, angle or url, url)
 
 
 @restricted
@@ -176,6 +221,7 @@ def main():
 
     app = Application.builder().token(token).build()
     app.add_handler(CommandHandler("topic", cmd_topic))
+    app.add_handler(CommandHandler("url", cmd_url))
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("queue", cmd_queue))
     app.add_handler(CommandHandler("cancel", cmd_cancel))

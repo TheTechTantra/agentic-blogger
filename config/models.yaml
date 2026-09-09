@@ -4,7 +4,33 @@ version: 1
 
 defaults:
   timeout_s: 600
-  max_retries: 3
+
+# One retry policy for every outbound service call — MLflow prompt fetches,
+# Blogger publishing, and LLM invocations all read these numbers. Adding a
+# retry anywhere else means using agentic_blogger/resilience.py, not a second
+# set of constants.
+#
+# Note: LangChain's Runnable .with_retry() only accepts an attempt count and a
+# jitter flag, so the LLM path honours max_attempts and jitter but not the
+# backoff bounds. tenacity call sites honour all four.
+resilience:
+  max_attempts: 5
+  initial_backoff_s: 1
+  max_backoff_s: 30
+  jitter: true
+
+# Prompt text lives in the MLflow Prompt Registry, which is the only source of
+# truth for it. There is no local fallback by design: if the registry is
+# unreachable the pipeline fails the job rather than running on stale or
+# default text.
+#
+# cache_ttl_seconds is set explicitly rather than inheriting MLflow's implicit
+# 60s alias-cache default. It is the window in which an edited prompt has not
+# taken effect yet, and equally the window in which a registry outage stays
+# invisible — those are the same number, so tune it deliberately.
+prompts:
+  alias: production
+  cache_ttl_seconds: 300
 
 providers:
   anthropic:
@@ -24,9 +50,12 @@ providers:
     base_url: "http://host.docker.internal:11434"
 
 roles:
+  # Restructures the raw research into ResearchBrief. Must reproduce code
+  # exemplars verbatim with their source URLs intact, so it needs both real
+  # instruction-following and enough output headroom for the code blocks.
   research_synth:
-    model: "anthropic:claude-haiku-4-5"
-    max_tokens: 8000
+    model: "anthropic:claude-sonnet-5"
+    max_tokens: 16000
     effort: low
 
   outline:
@@ -54,9 +83,13 @@ roles:
     max_tokens: 8000
     effort: low
 
+  # Bound to the web_search_20260209 / web_fetch_20260209 server tools, which
+  # require Opus 4.6+ or Sonnet 4.6+ — Haiku 4.5 rejects both type strings.
+  # No fallback is declared on purpose: a local model cannot run server tools,
+  # so falling back would produce an unsourced brief instead of a failure.
   search_tool:
-    model: "anthropic:claude-haiku-4-5"
-    max_tokens: 8000
+    model: "anthropic:claude-sonnet-5"
+    max_tokens: 16000
     effort: low
 
 fallbacks:

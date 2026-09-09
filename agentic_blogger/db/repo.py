@@ -31,16 +31,30 @@ def create_topic_and_job(
     requested_by: Optional[str],
     pipeline: str = "blog",
     config_snapshot: dict,
+    source_url: Optional[str] = None,
 ) -> dict:
     """Create (or reuse) a topic, then create a job for it.
+
+    `source_url` marks a URL-sourced job: the research node fetches that page
+    server-side and treats it as the primary source. It participates in the
+    topic hash, so the same angle written about two different articles is two
+    topics, not one — and re-submitting the same URL with the same angle still
+    dedupes onto the existing job.
 
     Returns {"job_id": ..., "reused": bool} — reused=True means an
     idempotency-key collision found an existing job instead of inserting.
     """
     normalized = " ".join(raw_text.strip().lower().split())
-    topic_hash = _hash(normalized)
+    # URLs are case- and whitespace-sensitive in ways prose is not, so hash the
+    # URL verbatim rather than folding it through `normalized`.
+    # Text-only topics keep their original single-part hash so rows created
+    # before URL support still dedupe.
+    topic_hash = _hash(normalized, source_url) if source_url else _hash(normalized)
     config_version = str(config_snapshot.get("config_version", "v1"))
     idempotency_key = _hash(topic_hash, pipeline, config_version)
+
+    if source_url:
+        config_snapshot = {**config_snapshot, "source_url": source_url}
 
     engine = get_engine()
     with engine.begin() as conn:
@@ -205,6 +219,7 @@ def record_node_run(
     cost_usd: Optional[Decimal] = None,
     latency_ms: Optional[int] = None,
     mlflow_span_id: Optional[str] = None,
+    prompts: Optional[list] = None,
     error_class: Optional[str] = None,
     error_message: Optional[str] = None,
     started_at: Optional[datetime] = None,
@@ -218,11 +233,11 @@ def record_node_run(
                 INSERT INTO app.node_runs
                     (id, job_id, node_name, attempt, provider, model, role,
                      tokens_in, tokens_out, cost_usd, latency_ms, mlflow_span_id,
-                     error_class, error_message, started_at, finished_at)
+                     prompts_json, error_class, error_message, started_at, finished_at)
                 VALUES
                     (:id, :job_id, :node_name, :attempt, :provider, :model, :role,
                      :tokens_in, :tokens_out, :cost_usd, :latency_ms, :mlflow_span_id,
-                     :error_class, :error_message, :started_at, :finished_at)
+                     :prompts_json, :error_class, :error_message, :started_at, :finished_at)
                 """
             ),
             {
@@ -238,6 +253,7 @@ def record_node_run(
                 "cost_usd": cost_usd,
                 "latency_ms": latency_ms,
                 "mlflow_span_id": mlflow_span_id,
+                "prompts_json": json.dumps(prompts) if prompts else None,
                 "error_class": error_class,
                 "error_message": error_message,
                 "started_at": started_at,
