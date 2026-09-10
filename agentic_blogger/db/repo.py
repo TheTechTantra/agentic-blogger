@@ -106,6 +106,8 @@ def create_topic_and_job(
                 "telegram_chat_id": config_snapshot.get("telegram_chat_id"),
             },
         )
+        logger.info("created job=%s topic_id=%s pipeline=%s source=%s source_url=%s",
+                    job_id, topic_id, pipeline, source, source_url or "-")
         return {"job_id": str(job_id), "reused": False, "state": "QUEUED"}
 
 
@@ -138,6 +140,8 @@ def claim_job(worker_id: str, lease_minutes: int = 15) -> Optional[dict]:
             text("SELECT raw_text FROM app.topics WHERE id = :id"),
             {"id": row["topic_id"]},
         ).mappings().first()
+        logger.info("claimed job=%s worker=%s attempt=%d/%d lease=%dmin",
+                    row["id"], worker_id, row["attempt"], row["max_attempts"], lease_minutes)
         return {
             "job_id": str(row["id"]),
             "thread_id": row["thread_id"],
@@ -148,16 +152,28 @@ def claim_job(worker_id: str, lease_minutes: int = 15) -> Optional[dict]:
         }
 
 
-def heartbeat_lease(job_id: str, lease_minutes: int = 15) -> None:
+def heartbeat_lease(job_id: str, worker_id: str, lease_minutes: int = 15) -> bool:
+    """Extend our lease on a job we are actively running. Returns False if the
+    lease is no longer ours.
+
+    The worker_id guard matters: claim_job hands a RUNNING job whose lease has
+    expired to whoever asks next, so a worker that stalled past its lease can
+    find the job reassigned underneath it. Renewing unconditionally would let
+    that stalled worker yank the lease back from the worker now legitimately
+    running the job, and both would drive the same graph. A False return means
+    we lost the race and must stop touching the job.
+    """
     engine = get_engine()
     with engine.begin() as conn:
-        conn.execute(
+        result = conn.execute(
             text(
                 "UPDATE app.jobs SET lease_expires_at = now() + make_interval(mins => :m), "
-                "updated_at = now() WHERE id = :id"
+                "updated_at = now() "
+                "WHERE id = :id AND state = 'RUNNING' AND lease_owner = :worker_id"
             ),
-            {"m": lease_minutes, "id": job_id},
+            {"m": lease_minutes, "id": job_id, "worker_id": worker_id},
         )
+        return result.rowcount == 1
 
 
 def mark_job_state(
@@ -192,6 +208,11 @@ def mark_job_state(
                 "id": job_id,
             },
         )
+    # The state machine is the spine of a trace: every other line is only
+    # interpretable relative to which state the job was in when it printed.
+    logger.info("job=%s state -> %s%s%s", job_id, state,
+                f" class={failure_class}" if failure_class else "",
+                f" reason={failure_reason[:200]}" if failure_reason else "")
 
 
 def add_job_cost(job_id: str, cost_usd: Decimal, tokens_in: int, tokens_out: int) -> None:
@@ -264,7 +285,11 @@ def record_node_run(
 
 def insert_research_sources(job_id: str, sources: list[dict], search_provider: str, search_query: str) -> None:
     if not sources:
+        logger.warning("job=%s no research sources to persist (provider=%s)",
+                       job_id, search_provider)
         return
+    logger.info("job=%s persisting %d research sources provider=%s",
+                job_id, len(sources), search_provider)
     engine = get_engine()
     with engine.begin() as conn:
         for rank, s in enumerate(sources):
@@ -340,6 +365,12 @@ def insert_draft(
                 "content_sha256": content_sha256,
             },
         ).mappings().first()
+    logger.info("job=%s draft v%d persisted id=%s words=%s markdown=%dch html=%s "
+                "outline=%s seo=%s sha=%s",
+                job_id, version, row["id"], word_count, len(markdown),
+                f"{len(html)}ch" if html else "none",
+                "yes" if outline_json else "no", "yes" if seo_json else "no",
+                content_sha256[:12])
     return str(row["id"])
 
 
@@ -398,6 +429,8 @@ def insert_publication_intent(job_id: str, draft_id: str, blog_id: str, request_
                 "request_id": request_id,
             },
         )
+    logger.info("job=%s publication intent PENDING draft_id=%s blog_id=%s platform=%s",
+                job_id, draft_id, blog_id, platform)
     return str(pub_id)
 
 
@@ -428,6 +461,9 @@ def update_publication(job_id: str, *, state: str, remote_post_id: Optional[str]
                 "platform": platform,
             },
         )
+    logger.info("job=%s publication -> %s post_id=%s url=%s%s",
+                job_id, state, remote_post_id or "-", remote_url or "-",
+                f" error={error_message[:200]}" if error_message else "")
 
 
 def get_job(job_id: str) -> Optional[dict]:
@@ -478,11 +514,13 @@ def request_cancel(job_id: str) -> Optional[str]:
                 text("UPDATE app.jobs SET state = 'CANCELLED', updated_at = now() WHERE id = :id"),
                 {"id": job_id},
             )
+            logger.info("job=%s cancelled while QUEUED", job_id)
             return "CANCELLED"
         conn.execute(
             text("UPDATE app.jobs SET cancel_requested = true, updated_at = now() WHERE id = :id"),
             {"id": job_id},
         )
+        logger.info("job=%s cancel requested (state=%s)", job_id, row["state"])
         return row["state"]
 
 
@@ -496,7 +534,11 @@ def retry_job(job_id: str) -> Optional[str]:
             ),
             {"id": job_id},
         ).mappings().first()
-        return str(row["id"]) if row else None
+        if not row:
+            logger.warning("job=%s retry refused — not in FAILED/BLOCKED", job_id)
+            return None
+        logger.info("job=%s re-queued for retry", job_id)
+        return str(row["id"])
 
 
 def cost_since(since: datetime) -> Decimal:

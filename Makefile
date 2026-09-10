@@ -1,4 +1,4 @@
-.PHONY: build up down logs ps shell psql clean nuke smoke push help migrate seed register-prompts export-prompts
+.PHONY: build up down logs ps shell psql clean nuke smoke push help migrate seed register-prompts export-prompts register-gateway
 
 help:
 	@echo "Targets:"
@@ -13,6 +13,7 @@ help:
 	@echo "  seed        - ./scripts/seed_secrets.sh"
 	@echo "  smoke       - Run smoke tests (steps 7-10 of build order)"
 	@echo "  register-prompts - Seed the MLflow Prompt Registry (bootstrap)"
+	@echo "  register-gateway - Converge the MLflow AI Gateway from config/models.yaml"
 	@echo "  export-prompts   - Back up the registry to prompts_backup/"
 	@echo "  clean       - Remove containers and volumes"
 	@echo "  nuke        - Clean + rm data/ directory"
@@ -48,6 +49,8 @@ seed:
 smoke:
 	@echo "Running smoke tests..."
 	docker compose run --rm orchestrator python -m scripts.smoke_prompts
+	docker compose run --rm orchestrator python -m scripts.smoke_mlflow
+	docker compose run --rm orchestrator python -m scripts.smoke_gateway
 	docker compose run --rm orchestrator python -m scripts.smoke_llm
 	docker compose run --rm orchestrator python -m scripts.smoke_search
 	docker compose run --rm orchestrator python -m scripts.smoke_blogger
@@ -55,6 +58,13 @@ smoke:
 register-prompts:
 	@echo "Seeding the MLflow Prompt Registry (creates new versions)..."
 	docker compose run --rm orchestrator python -m scripts.register_prompts
+
+# Idempotent, unlike register-prompts: matches by name and updates in place.
+# Safe to re-run -- and required after rotating a provider API key in TinyDB,
+# which is what pushes the new value into the gateway's encrypted store.
+register-gateway:
+	@echo "Converging the MLflow AI Gateway from config/models.yaml..."
+	docker compose run --rm orchestrator python -m scripts.register_gateway
 
 export-prompts:
 	@echo "Backing up the prompt registry to prompts_backup/ ..."

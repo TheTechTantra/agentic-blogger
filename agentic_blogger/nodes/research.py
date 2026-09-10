@@ -1,11 +1,11 @@
 """Research node — two passes.
 
-1. search_tool role bound to web_search_20260209, forced to actually search
-   (tool_choice), gathering tier-stratified material and citable code. For a
-   URL-sourced job (state["source_url"]) web_fetch_20260209 is bound too and
-   forced first, so the article is read before anything is searched. Both are
-   Anthropic server-side tools: the page is fetched and extracted on their
-   infrastructure, never by this container.
+1. search_tool role bound to web_search_20260209, gathering tier-stratified
+   material and citable code. For a URL-sourced job (state["source_url"])
+   web_fetch_20260209 is bound too, and the prompt tells the model to read the
+   article before searching. Both are Anthropic server-side tools: the page is
+   fetched and extracted on their infrastructure, never by this container.
+   Neither tool is forced with tool_choice — see the _SEARCH_TOOL comment.
 2. research_synth role structures that raw text into a ResearchBrief so the
    downstream nodes can route material per reader tier instead of
    re-deriving it from prose.
@@ -36,6 +36,14 @@ logger = logging.getLogger(__name__)
 # versions are not zero-data-retention eligible with filtering on. Re-add
 # `allowed_callers: ["direct"]` to both if this deployment ever needs ZDR, and
 # expect research on PDFs to get much more expensive.
+#
+# The other consequence: without `allowed_callers: ["direct"]` these tools are
+# reachable only from code execution, and a forced `tool_choice` naming one is
+# rejected outright — "Tools specified in tool_choice must allow 'direct' calls
+# from the model" (400). So research_node binds them unforced and relies on the
+# prompt to make the model search; research_user and research_url_user both
+# instruct it explicitly. The `if not sources` warning below is the detector if
+# a future prompt revision ever loses that instruction.
 _SEARCH_TOOL = {
     "type": "web_search_20260209",
     "name": "web_search",
@@ -68,6 +76,8 @@ def _handle_search_result(block: dict, sources: list[dict]) -> None:
         logger.warning("web_search returned an error block: %s", results.get("error_code"))
         return
     if not isinstance(results, list):
+        logger.warning("web_search result content was %s, not a list — no sources extracted",
+                       type(results).__name__)
         return
     for r in results:
         if isinstance(r, dict) and r.get("url"):
@@ -221,13 +231,14 @@ def _synthesize(job_id: str, topic: str, raw: str, sources: list[dict],
         },
     )
 
+    logger.info("synthesizing brief from %dch raw text over %d sources", len(raw), len(sources))
     with track_llm_call(job_id, "research_synth", "research_synth", spec["model"]) as record:
         result = llm.invoke([HumanMessage(content=prompt)])
         record(result["raw"])
 
     parsed: ResearchBrief | None = result.get("parsed")
     if parsed is None:
-        logger.warning("job=%s research_synth returned no parsed brief — falling back to prose", job_id)
+        logger.warning("research_synth returned no parsed brief — falling back to prose")
         return {"brief": raw}
     return parsed.model_dump()
 
@@ -239,18 +250,19 @@ def research_node(state: dict) -> dict:
     spec = role_spec("search_tool")
 
     if source_url:
-        # web_fetch is forced first so the article is read before any search;
-        # tool_choice only constrains the first call, so the model is free to
-        # search afterwards.
+        # Ordering (fetch the article, then search around it) is carried by the
+        # prompt, not tool_choice — see the _SEARCH_TOOL comment for why these
+        # tools cannot be forced.
         tools = [_FETCH_TOOL, _SEARCH_TOOL]
-        tool_choice = {"type": "tool", "name": "web_fetch"}
         prompt = _url_prompt(source_url, topic)
     else:
         tools = [_SEARCH_TOOL]
-        tool_choice = {"type": "tool", "name": "web_search"}
         prompt = _search_prompt(topic)
 
-    llm = build_llm("search_tool").bind_tools(tools, tool_choice=tool_choice)
+    logger.info("binding server tools: %s (max_uses %s)",
+                ", ".join(t["name"] for t in tools),
+                "/".join(str(t["max_uses"]) for t in tools))
+    llm = build_llm("search_tool").bind_tools(tools)
     llm = with_resilience(llm, "search_tool")
 
     system = render(S.RESEARCH_SYSTEM)
@@ -264,8 +276,16 @@ def research_node(state: dict) -> dict:
 
     raw, sources = _extract_text_and_sources(response.content)
 
+    # Blocks in, sources out: when these disagree (many blocks, no sources) the
+    # parse shape changed, which is otherwise indistinguishable from the model
+    # never searching. Both failure modes have happened.
+    block_count = len(response.content) if isinstance(response.content, list) else 1
+    logger.info("research returned %d content blocks, %dch prose, %d sources (%d primary_url)",
+                block_count, len(raw), len(sources),
+                sum(1 for s in sources if s.get("source_type") == "primary_url"))
+
     if not sources:
-        logger.warning("job=%s research produced no extractable sources", job_id)
+        logger.warning("research produced no extractable sources")
 
     if source_url and not any(s.get("source_type") == "primary_url" for s in sources):
         # The whole premise of a /url job is that the page was read. If the
@@ -283,8 +303,8 @@ def research_node(state: dict) -> dict:
     exemplars = brief.get("code_exemplars") or []
     attributed = [e for e in exemplars if e.get("source_url")]
     if len(attributed) != len(exemplars):
-        logger.warning("job=%s dropped %d unattributed code exemplars",
-                       job_id, len(exemplars) - len(attributed))
+        logger.warning("dropped %d unattributed code exemplars",
+                       len(exemplars) - len(attributed))
         brief["code_exemplars"] = attributed
 
     if source_url and not (brief.get("primary_source") or {}).get("title"):
@@ -293,9 +313,10 @@ def research_node(state: dict) -> dict:
         # pipeline must never produce.
         raise RuntimeError(f"no primary_source citation extracted for {source_url}")
 
-    logger.info("job=%s research tiers=%d exemplars=%d format=%s", job_id,
+    logger.info("brief tiers=%d exemplars=%d contested=%d format=%s brief_len=%dch",
                 len(brief.get("tiers") or []), len(brief.get("code_exemplars") or []),
-                brief.get("recommended_format"))
+                len(brief.get("contested_or_unknown") or []),
+                brief.get("recommended_format"), len(brief.get("brief") or ""))
 
     return {
         "research_brief": brief,

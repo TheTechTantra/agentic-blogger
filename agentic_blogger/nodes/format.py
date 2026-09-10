@@ -1,8 +1,12 @@
 """Format node — markdown to sanitized HTML, plus beacon + fact-check comment.
 No LLM call, no cost."""
 
+import logging
+
 import bleach
 from markdown_it import MarkdownIt
+
+logger = logging.getLogger(__name__)
 
 _ALLOWED_TAGS = [
     "p", "br", "hr", "h1", "h2", "h3", "h4", "h5", "h6",
@@ -33,5 +37,12 @@ def format_node(state: dict) -> dict:
     factcheck_comment = f"<!-- factcheck: {unsupported} unsupported, {contradicted} contradicted -->"
 
     full_html = f"{beacon}\n{factcheck_comment}\n{safe_html}"
+
+    # Sanitization is silent by design, so the only way to notice bleach
+    # eating content (a tag outside the allowlist) is the before/after delta.
+    logger.info("formatted markdown=%dch html=%dch (sanitizer dropped %dch) "
+                "unsupported=%d contradicted=%d",
+                len(markdown), len(full_html), len(raw_html) - len(safe_html),
+                unsupported, contradicted)
 
     return {"html": full_html}

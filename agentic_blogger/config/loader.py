@@ -1,4 +1,4 @@
-"""Load config/models.yaml and config/pricing.yaml."""
+"""Load config/models.yaml."""
 
 import os
 from functools import lru_cache
@@ -15,12 +15,6 @@ if not CONFIG_DIR.exists():
 @lru_cache(maxsize=1)
 def load_models() -> dict:
     with open(CONFIG_DIR / "models.yaml") as f:
-        return yaml.safe_load(f)
-
-
-@lru_cache(maxsize=1)
-def load_pricing() -> dict:
-    with open(CONFIG_DIR / "pricing.yaml") as f:
         return yaml.safe_load(f)
 
 
@@ -46,6 +40,34 @@ def prompts_spec() -> dict:
         "alias": cfg.get("alias", "production"),
         "cache_ttl_seconds": cfg.get("cache_ttl_seconds", 300),
     }
+
+
+def gateway_spec() -> dict:
+    """MLflow AI Gateway routing settings.
+
+    `base_url` is left empty in config/models.yaml on purpose: the MLflow host
+    is declared once, in docker-compose.yml, and derived from there. A literal
+    value in the config file wins if one is set.
+
+    Defaults here are the disabled ones. A models.yaml with no `gateway:` block
+    at all therefore behaves exactly as it did before the gateway existed,
+    which is what makes this safe to load from a fallback-construction path.
+    """
+    cfg = load_models().get("gateway") or {}
+    base_url = (cfg.get("base_url") or "").rstrip("/")
+    if not base_url:
+        tracking = os.getenv("MLFLOW_TRACKING_URI", "http://mlflow:5000").rstrip("/")
+        base_url = f"{tracking}/gateway"
+    return {
+        "enabled": bool(cfg.get("enabled", False)),
+        "base_url": base_url,
+        "surfaces": cfg.get("surfaces") or {},
+    }
+
+
+def timeout_s() -> int:
+    """Client-side HTTP timeout for LLM calls (config/models.yaml `defaults:`)."""
+    return (load_models().get("defaults") or {}).get("timeout_s", 600)
 
 
 def role_spec(role: str) -> dict:

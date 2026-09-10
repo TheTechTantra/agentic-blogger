@@ -10,8 +10,9 @@ import time
 from contextlib import contextmanager
 from decimal import Decimal
 
+from agentic_blogger.config.loader import fallback_specs
 from agentic_blogger.db import repo
-from agentic_blogger.llm.pricing import cost_from_usage
+from agentic_blogger.llm.cost import cost_for_call
 from agentic_blogger.prompts import drain
 
 logger = logging.getLogger(__name__)
@@ -28,16 +29,25 @@ def track_llm_call(job_id: str, node_name: str, role: str, model_key: str):
     """
     provider, model = model_key.split(":", 1)
     started = time.monotonic()
-    started_ts = None
+    # Wall clock, separately from the monotonic latency clock: the gateway
+    # timestamps its traces in epoch milliseconds and cost is attributed by
+    # matching that window (see llm/cost.py).
+    started_ms = int(time.time() * 1000)
     result_holder: dict = {}
 
     def _record(response):
         result_holder["response"] = response
 
+    # Printed before the call, not after: a 12-minute research call is
+    # otherwise a 12-minute gap in the log with nothing saying what is running.
+    logger.info("llm call start node=%s role=%s model=%s", node_name, role, model_key)
+
     try:
         yield _record
     except Exception as e:
         latency_ms = int((time.monotonic() - started) * 1000)
+        logger.error("llm call FAILED node=%s role=%s model=%s after %dms: %s: %s",
+                     node_name, role, model_key, latency_ms, type(e).__name__, e)
         repo.record_node_run(
             job_id, node_name, provider=provider, model=model, role=role,
             latency_ms=latency_ms, prompts=drain(),
@@ -46,11 +56,20 @@ def track_llm_call(job_id: str, node_name: str, role: str, model_key: str):
         raise
     else:
         latency_ms = int((time.monotonic() - started) * 1000)
+        ended_ms = int(time.time() * 1000)
         response = result_holder.get("response")
         usage = getattr(response, "usage_metadata", None) or {}
-        cost = cost_from_usage(provider, model, usage) if usage else Decimal("0")
         tokens_in = usage.get("input_tokens", 0)
         tokens_out = usage.get("output_tokens", 0)
+        # Cost comes from the gateway, never from a local rate table. Every
+        # model this call could have reached is asked for, not just the
+        # primary: a retry or a fallback to another model spent real money and
+        # belongs on this node's row. Nothing is recorded if the response
+        # carried no usage — that means no provider call was billed.
+        cost = (
+            cost_for_call([model_key, *fallback_specs(model_key)], started_ms, ended_ms)
+            if usage else Decimal("0")
+        )
         # drain() attributes every prompt resolved since the last node_run to
         # this one — nodes render before invoking, so this is the whole set the
         # call actually used.

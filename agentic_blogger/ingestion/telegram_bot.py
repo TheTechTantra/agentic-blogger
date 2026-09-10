@@ -16,6 +16,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandl
 from agentic_blogger.config.loader import load_models
 from agentic_blogger.config.loader import prompts_spec
 from agentic_blogger.db import repo
+from agentic_blogger.observability.log_setup import bind_job, setup_logging
 from agentic_blogger.secrets.store import SecretStore
 from agentic_blogger.security import totp
 
@@ -24,7 +25,12 @@ _TOTP_CODE_RE = re.compile(r"\d{6}")
 # URL-sourced job. A URL mentioned mid-sentence is part of the topic text.
 _URL_RE = re.compile(r"^https?://\S+$")
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+# httpx logs every request at INFO including the full URL, which for the
+# Telegram API means the bot token as a path segment. It runs at INFO again
+# because setup_logging installs a redaction filter that rewrites the token
+# out of the record before it is emitted — the per-request line is worth
+# keeping, it is the only evidence that a poll actually left the container.
+setup_logging("telegram")
 logger = logging.getLogger(__name__)
 
 _store = SecretStore(readonly=True)
@@ -51,6 +57,12 @@ def restricted(func):
     @wraps(func)
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = str(update.effective_user.id) if update.effective_user else None
+        # Length only, never the text: a message body starts with a live TOTP
+        # code and may carry anything else the user typed.
+        logger.info("update received handler=%s user_id=%s chat_id=%s text_len=%d",
+                    func.__name__, user_id,
+                    update.effective_chat.id if update.effective_chat else None,
+                    len(update.message.text or "") if update.message else 0)
         if user_id not in _allowed_ids():
             logger.warning("Unauthorized access attempt from user_id=%s", user_id)
             await update.message.reply_text("Not authorized.")
@@ -69,11 +81,21 @@ def restricted(func):
             return
 
         context.args = rest_args
-        return await func(update, context)
+        logger.info("authorized handler=%s user_id=%s argc=%d", func.__name__, user_id,
+                    len(rest_args))
+        try:
+            return await func(update, context)
+        except Exception:
+            # Without this the handler error goes only to PTB's own error
+            # machinery and the user sees silence; log it against the handler
+            # that raised, then let PTB handle it as before.
+            logger.exception("handler=%s raised for user_id=%s", func.__name__, user_id)
+            raise
     return wrapper
 
 
 async def _queue(update: Update, topic_text: str, source_url: str | None) -> None:
+    logger.info("queueing source_url=%s topic=%r", source_url or "-", topic_text[:120])
     result = repo.create_topic_and_job(
         topic_text,
         source="telegram",
@@ -88,6 +110,17 @@ async def _queue(update: Update, topic_text: str, source_url: str | None) -> Non
         },
         source_url=source_url,
     )
+    with bind_job(result["job_id"]):
+        if result["reused"]:
+            # Worth a WARNING: this is the shape that confuses people — the
+            # same topic text dedupes onto an earlier job, including one that
+            # already exhausted its attempts and will never run again.
+            logger.warning("deduped onto existing job (state=%s) — no new work queued",
+                           result["state"])
+        else:
+            logger.info("queued new job source=telegram requested_by=%s state=%s",
+                        update.effective_user.id, result["state"])
+
     if result["reused"]:
         await update.message.reply_text(
             f"Already queued as job {result['job_id']} (state={result['state']})"

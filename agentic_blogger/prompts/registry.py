@@ -95,10 +95,15 @@ def load(name: str):
     try:
         prompt = _fetch(uri, cfg["cache_ttl_seconds"])
     except Exception as e:
+        logger.error("prompt load failed uri=%s: %s: %s", uri, type(e).__name__, e)
         raise PromptRegistryError(f"could not load prompt {uri}: {e}") from e
 
     acc = _accumulator()
     if not any(u["name"] == name for u in acc):
+        # First resolution of this prompt for the pending node_run. Logged at
+        # INFO because "which version of the prompt ran" is the question a bad
+        # output raises, and the alias moves independently of any deploy.
+        logger.info("prompt %s@%s resolved to v%s", name, cfg["alias"], prompt.version)
         acc.append({"name": name, "version": prompt.version, "alias": cfg["alias"]})
     return prompt
 

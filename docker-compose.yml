@@ -74,6 +74,45 @@ services:
       POSTGRES_MLFLOW_DSN: "postgresql+psycopg2://agentic_blogger:${POSTGRES_PASSWORD:?}@postgres:5432/mlflow"
       MLFLOW_DEFAULT_ARTIFACT_ROOT: "/mlartifacts"
       MLFLOW_TRACKING_URI: "http://mlflow:5000"
+      # The entrypoint pulls MLFLOW_CRYPTO_KEK_PASSPHRASE from TinyDB with
+      # these two, the same way the orchestrator reads every other secret.
+      SECRET_STORE_TOKEN: "${SECRET_STORE_TOKEN:-}"
+      TINYDB_URL: "http://tinydb:28080"
+      # The job pool (judges, scorers, online scoring, webhooks) is unused
+      # here and was a large share of the process count that made 2G too
+      # small. Off, so the one uvicorn worker gets the memory.
+      MLFLOW_SERVER_ENABLE_JOB_EXECUTION: "false"
+      # How stale a budget-policy edit made in the UI can be before the
+      # gateway honours it. Set explicitly for the same reason
+      # prompts.cache_ttl_seconds is: the default (600s) is also the window
+      # in which a tightened budget is not yet enforced.
+      MLFLOW_GATEWAY_BUDGET_REFRESH_INTERVAL: "60"
+      # How long the gateway waits on the provider before giving up on one
+      # request. MLflow's default is 300s, which is shorter than a research
+      # call's agentic web_search loop (max_uses 12) and cut one off at
+      # exactly 300.9s — surfacing as a 500 the client cannot tell apart from
+      # a real gateway fault. Kept ABOVE config/models.yaml defaults.timeout_s
+      # (600) on purpose: the client's timeout should be the one that decides,
+      # so the gateway never severs a call that is still producing.
+      #
+      # Ceiling, not a target. The gateway holds its single uvicorn worker for
+      # the whole call (see --workers 1 in entrypoint.sh), so this is also the
+      # longest one stuck call can block every other gateway request.
+      MLFLOW_GATEWAY_ROUTE_TIMEOUT_SECONDS: "900"
+      # The gateway is the only place cost is computed, and llm/callbacks.py
+      # reads it back per call. Async export buffers spans for up to
+      # MLFLOW_ASYNC_TRACE_LOGGING_MAX_INTERVAL_MILLIS (5000) before writing
+      # them, which measured as a 4.7s wait before a call's cost became
+      # queryable. Synchronous export writes the trace before the gateway
+      # answers, so the cost row exists by the time the caller has its
+      # response. The added latency is a local Postgres write against calls
+      # that take seconds to minutes.
+      MLFLOW_ENABLE_ASYNC_TRACE_LOGGING: "false"
+    # The gateway, not the orchestrator, is now the process that talks to
+    # Ollama for the qwen3.5:9b fallback, so it is this container that needs
+    # a route to the host's Ollama.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - "${MLFLOW_ARTIFACTS:-./data/mlartifacts}:/mlartifacts"
     depends_on:
@@ -96,10 +135,12 @@ services:
           # anon against a 2048 MiB cap, with 358 forced-reclaim events and
           # socket throttling.
           #
-          # If this needs raising again, prefer cutting processes over adding
-          # RAM: `--workers 2` and MLFLOW_SERVER_ENABLE_JOB_EXECUTION=false
-          # together drop most of it, and the job pool serves judges, scorers,
-          # online scoring and webhooks — none of which this pipeline uses.
+          # Both remedies are now applied: the entrypoint pins --workers 1
+          # (also required for correct budget accounting, see the note there)
+          # and MLFLOW_SERVER_ENABLE_JOB_EXECUTION is false above. 3G is kept
+          # rather than cut back because the gateway holds a worker open for
+          # the whole duration of every LLM call, including multi-minute
+          # draft/factcheck ones — headroom is cheaper than a mid-job OOM.
           memory: 3G
           cpus: "1"
 
@@ -134,6 +175,11 @@ services:
       MLFLOW_HTTP_REQUEST_MAX_RETRIES: "4"
       MLFLOW_HTTP_REQUEST_TIMEOUT: "10"
       MLFLOW_HTTP_REQUEST_BACKOFF_FACTOR: "1"
+      # Application log level. DEBUG adds prompt-resolution and per-call
+      # payload detail; library loggers are floored independently in
+      # observability/log_setup.py so DEBUG here does not unleash
+      # langchain/httpcore internals.
+      LOG_LEVEL: "${LOG_LEVEL:-INFO}"
     depends_on:
       postgres:
         condition: service_healthy
@@ -164,6 +210,7 @@ services:
       TINYDB_HOST: tinydb
       TINYDB_PORT: "28080"
       SECRET_STORE_TOKEN: "${SECRET_STORE_TOKEN:-}"
+      LOG_LEVEL: "${LOG_LEVEL:-INFO}"
     depends_on:
       postgres:
         condition: service_healthy

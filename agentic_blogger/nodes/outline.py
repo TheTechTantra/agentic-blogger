@@ -45,4 +45,9 @@ def outline_node(state: dict) -> dict:
         record(result["raw"])
 
     outline: Outline = result["parsed"]
-    return {"outline_plan": outline.model_dump()}
+    plan = outline.model_dump()
+    logger.info("outline sections=%d titles=%d source_rules=%s chosen_title=%r",
+                len(plan.get("sections") or []), len(plan.get("title_options") or []),
+                "yes" if source_rules else "no",
+                (plan.get("title_options") or ["(none)"])[0])
+    return {"outline_plan": plan}

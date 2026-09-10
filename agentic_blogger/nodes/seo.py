@@ -31,5 +31,17 @@ def seo_node(state: dict) -> dict:
 
     seo: SeoMeta = result["parsed"]
     seo_dict = seo.model_dump()
-    seo_dict["labels"] = seo_dict["labels"][:20]  # Blogger caps at 20
+    proposed = seo_dict["labels"]
+    seo_dict["labels"] = proposed[:20]  # Blogger caps at 20
+    if len(proposed) > 20:
+        logger.warning("seo returned %d labels — dropped %d over Blogger's count cap: %s",
+                       len(proposed), len(proposed) - 20,
+                       ", ".join(repr(x) for x in proposed[20:]))
+    # The character cap is enforced at the API boundary (blogger_client
+    # _fit_labels), but log the joined length here so an over-length set is
+    # attributable to the seo call that produced it.
+    logger.info("seo title=%r (%dch) labels=%d/%dch slug=%r meta_description=%dch",
+                seo_dict.get("title"), len(seo_dict.get("title") or ""),
+                len(seo_dict["labels"]), len(",".join(seo_dict["labels"])),
+                seo_dict.get("slug"), len(seo_dict.get("meta_description") or ""))
     return {"seo_meta": seo_dict}

@@ -40,7 +40,9 @@ except ImportError as e:
     sys.exit(1)
 
 
-# Pricing table (from config/pricing.yaml)
+# Pricing table, local to this smoke test only. The pipeline itself does not
+# price anything — llm/cost.py reads the figure back from the AI Gateway.
+# Do not treat these numbers as authoritative or copy them anywhere.
 PRICING = {
     "anthropic": {
         "claude-haiku-4-5": {

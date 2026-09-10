@@ -34,7 +34,17 @@ def factcheck_node(state: dict) -> dict:
     report: FactCheckReport = result["parsed"]
     findings = [f.model_dump() for f in report.findings]
 
-    logger.info("job=%s factcheck findings=%d", job_id, len(findings))
+    verdicts: dict[str, int] = {}
+    for f in findings:
+        verdicts[f.get("verdict", "unknown")] = verdicts.get(f.get("verdict", "unknown"), 0) + 1
+    logger.info("factcheck findings=%d verdicts=%s", len(findings),
+                ",".join(f"{k}={v}" for k, v in sorted(verdicts.items())) or "-")
+    for f in findings:
+        if f.get("verdict") in ("unsupported", "contradicted"):
+            # The flagged claims are what the revise node will act on; without
+            # them the log says a revision happened but never says why.
+            logger.info("flagged [%s] %r (source=%s)", f.get("verdict"),
+                        (f.get("claim") or "")[:160], f.get("source_url") or "-")
     return {"factcheck_report": {"findings": findings}}
 
 

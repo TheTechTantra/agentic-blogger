@@ -2,6 +2,10 @@
 
 version: 1
 
+# Client-side HTTP timeout for LLM calls. Wired into the chat model
+# constructors in llm/registry.py. It matters more now that calls traverse the
+# AI Gateway: an unset timeout on a hop in front of a 12-minute draft call is a
+# hang with no upper bound, not a slow call.
 defaults:
   timeout_s: 600
 
@@ -31,6 +35,47 @@ resilience:
 prompts:
   alias: production
   cache_ttl_seconds: 300
+
+# Every LLM call leaves this process addressed to the MLflow AI Gateway, never
+# to a provider directly. The gateway holds the provider credentials (encrypted,
+# server-side), records per-model token/cost/latency usage, and enforces the
+# budget and rate-limit policies configured in its UI.
+#
+# This is a hard dependency, matching `prompts:` above: a gateway outage fails
+# the job. There is deliberately no bypass — a bypass would mean spend that no
+# budget sees and calls that no usage table records, which is the whole point
+# of routing through it.
+#
+# Endpoint names registered in the gateway are exactly the model ids below
+# ("claude-opus-5", "qwen3.5:9b", ...). That convention is load-bearing: it lets
+# `provider:model` keys and per-node cost attribution in llm/callbacks.py keep
+# working with base_url as the only thing that changed.
+gateway:
+  enabled: true
+
+  # Empty = derive from MLFLOW_TRACKING_URI (+ "/gateway"), so the MLflow host
+  # is configured in exactly one place — docker-compose.yml. Set a literal URL
+  # here only to point at a gateway that is not the tracking server.
+  base_url: ""
+
+  # Which call surface each provider uses.
+  #   passthrough — {base_url}/{provider}, provider-native request body
+  #                 forwarded as-is. Required for Anthropic: server tools
+  #                 (web_search/web_fetch), adaptive thinking blocks, and the
+  #                 prompt-cache token buckets only exist in that body shape.
+  #   openai      — the unified {base_url}/mlflow/v1 OpenAI-compatible surface,
+  #                 addressed by endpoint name. Used for providers with nothing
+  #                 provider-specific to preserve.
+  # Anthropic is the only passthrough. langchain-google-genai cannot address
+  # the gateway's Gemini route (/gemini/v1beta/models/{endpoint}:generateContent)
+  # without reaching into its transport, and nothing in the Gemini or Ollama
+  # request shape needs preserving the way Anthropic's server tools do — so
+  # they take the unified surface, which one client speaks for all of them.
+  surfaces:
+    anthropic: passthrough
+    gemini: openai
+    openai: openai
+    ollama: openai
 
 providers:
   anthropic:

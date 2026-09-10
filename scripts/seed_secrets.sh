@@ -76,6 +76,40 @@ store_secret "BLOGGER_REFRESH_TOKEN" "Enter BLOGGER_REFRESH_TOKEN (run blogger_a
 store_secret "BLOGGER_BLOG_ID" "Enter BLOGGER_BLOG_ID" false
 
 echo ""
+echo -e "${YELLOW}=== MLFLOW AI GATEWAY ===${NC}"
+# The gateway derives the key-encryption key for its provider-credential store
+# from this passphrase. It cannot be rotated: change it and every secret
+# already registered in the gateway becomes undecryptable, and the endpoints
+# built on them start failing at invocation time rather than at startup.
+# Generated rather than typed, because nothing needs a human to know it.
+store_kek() {
+    existing=$(curl -s -H "X-API-Key: $SECRET_STORE_TOKEN" \
+        "$TINYDB_URL/credential/MLFLOW_CRYPTO_KEK_PASSPHRASE" 2>/dev/null || true)
+
+    if echo "$existing" | grep -q '"value"'; then
+        echo -e "${GREEN}✓ MLFLOW_CRYPTO_KEK_PASSPHRASE already set — left untouched${NC}"
+        echo -e "${YELLOW}  (overwriting it would orphan every credential in the gateway store)${NC}"
+        return
+    fi
+
+    value=$(python3 -c "import secrets; print(secrets.token_urlsafe(48))")
+    response=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -H "X-API-Key: $SECRET_STORE_TOKEN" \
+        -d "{\"key\": \"MLFLOW_CRYPTO_KEK_PASSPHRASE\", \"value\": \"$value\"}" \
+        "$TINYDB_URL/key/")
+
+    if echo "$response" | grep -q '"result":"ok"'; then
+        echo -e "${GREEN}✓ Generated and stored MLFLOW_CRYPTO_KEK_PASSPHRASE${NC}"
+    else
+        echo -e "${RED}✗ Failed to store MLFLOW_CRYPTO_KEK_PASSPHRASE${NC}"
+        echo "Response: $response"
+        exit 1
+    fi
+}
+store_kek
+
+echo ""
 echo -e "${YELLOW}=== DATABASE ===${NC}"
 store_secret "POSTGRES_APP_DSN" "Enter POSTGRES_APP_DSN (or auto-generated: postgresql://agentic_blogger:PASSWORD@postgres:5432/blogger)" false
 store_secret "POSTGRES_MLFLOW_DSN" "Enter POSTGRES_MLFLOW_DSN (or auto-generated: postgresql://agentic_blogger:PASSWORD@postgres:5432/mlflow)" false
@@ -83,3 +117,4 @@ store_secret "POSTGRES_MLFLOW_DSN" "Enter POSTGRES_MLFLOW_DSN (or auto-generated
 echo ""
 echo -e "${GREEN}Done! Secrets seeded to $TINYDB_URL${NC}"
 echo -e "${YELLOW}Next step: docker compose run --rm orchestrator alembic upgrade head${NC}"
+echo -e "${YELLOW}Then:      make register-gateway   (push provider keys into the AI Gateway)${NC}"

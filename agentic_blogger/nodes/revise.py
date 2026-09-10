@@ -27,6 +27,9 @@ def revise_node(state: dict) -> dict:
 
     flagged = [f for f in findings if f.get("verdict") in ("unsupported", "contradicted")]
 
+    logger.info("revising %d flagged findings into a %d-word draft (revision %d)",
+                len(flagged), len(draft.split()), state.get("revision_count", 0) + 1)
+
     prompt = render(S.REVISE_USER, content={"findings": flagged, "draft": draft})
 
     llm = with_resilience(build_llm("draft"), "draft")
@@ -36,6 +39,8 @@ def revise_node(state: dict) -> dict:
 
     revised = extract_text(response.content)
     word_count = len(revised.split())
+    logger.info("revised words %d -> %d (%+d)", len(draft.split()), word_count,
+                word_count - len(draft.split()))
 
     to_draft_id = repo.insert_draft(
         job_id, version=state.get("revision_count", 0) + 1, title=title,

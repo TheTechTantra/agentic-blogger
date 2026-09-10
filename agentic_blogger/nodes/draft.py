@@ -54,6 +54,8 @@ def draft_node(state: dict) -> dict:
 
     markdown = extract_text(response.content)
     word_count = len(markdown.split())
+    logger.info("draft written words=%d chars=%d title=%r contract=%s",
+                word_count, len(markdown), title, "yes" if contract else "no")
 
     draft_id = repo.insert_draft(
         job_id, version=0, title=title, markdown=markdown, word_count=word_count,

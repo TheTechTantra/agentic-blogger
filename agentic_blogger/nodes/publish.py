@@ -22,9 +22,18 @@ def publish_node(state: dict) -> dict:
     html = state.get("html", "")
     labels = seo.get("labels", [])
 
+    logger.info("publish inputs draft_id=%s title=%r html=%dch labels=%d seo_title=%s",
+                draft_id, title, len(html), len(labels),
+                "yes" if seo.get("title") else "no (fell back to draft_title)")
+    if not html:
+        # Publishing an empty body succeeds at the API and produces a blank
+        # post — worth a loud line, since nothing downstream will complain.
+        logger.error("html is empty — the post will publish with no body")
+
     existing = repo.get_pending_publication(job_id)
     if existing and existing["state"] in ("DRAFT", "LIVE"):
-        logger.info("job=%s already published (state=%s) — skipping", job_id, existing["state"])
+        logger.info("already published (state=%s post_id=%s) — skipping insert",
+                    existing["state"], existing["remote_post_id"])
         return {"published": {
             "remote_post_id": existing["remote_post_id"],
             "remote_url": existing["remote_url"],
@@ -37,11 +46,13 @@ def publish_node(state: dict) -> dict:
     try:
         result = publish_draft(job_id, title, html, labels)
     except InvalidGrantError as e:
+        logger.error("publish blocked on expired/revoked Blogger grant")
         repo.update_publication(job_id, state="FAILED", error_message=str(e))
         raise JobBlocked(
             "Blogger refresh token expired/revoked — re-run scripts/blogger_authorize.py"
         ) from e
     except Exception as e:
+        logger.error("publish failed after retries: %s: %s", type(e).__name__, e)
         repo.update_publication(job_id, state="FAILED", error_message=str(e))
         raise
 

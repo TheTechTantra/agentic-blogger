@@ -4,6 +4,11 @@ langchain-core>=0.3.0,<1.0.0
 langchain-anthropic>=0.3.0,<0.4.0
 langchain-google-genai>=2.0.0,<3.0.0
 langchain-ollama>=0.2.0,<0.3.0
+# Not for OpenAI-the-provider — there is no OpenAI role. This is the client for
+# the MLflow AI Gateway's OpenAI-compatible surface (/gateway/mlflow/v1), which
+# is how every non-Anthropic model reaches the gateway. Anthropic goes through
+# the provider passthrough instead, via langchain-anthropic above.
+langchain-openai>=0.2.0,<0.4.0
 langgraph>=0.2.0,<0.3.0
 langgraph-checkpoint-postgres>=2.0.0,<3.0.0
 

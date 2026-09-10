@@ -37,15 +37,15 @@
        │ build_llm(role)             │ start_job_run()          │ SecretStore
        ▼                             ▼                          ▼
 ┌──────────────────┐      ┌────────────────────┐      ┌────────────────────┐
-│ LLM providers    │      │ MLflow  :25000     │      │ TinyDBService      │
-│ anthropic (all   │      │ experiment         │      │ :28080 HTTP vault  │
-│  live roles)     │      │ agentic-blogger/   │      │ API keys, Blogger  │
-│ ollama (fallback │      │ blog; langchain    │      │ OAuth, bot token,  │
-│  for haiku)      │      │ autolog; fail-open │      │ user allowlist     │
-│ openai / gemini  │      └────────────────────┘      └────────────────────┘
-│  configured, no  │
-│  role uses them  │      ┌────────────────────────────────────────────────┐
-└──────────────────┘      │ Google Blogger API v3 — posts.insert(          │
+│ MLflow  :25000   │      │ MLflow  :25000     │      │ TinyDBService      │
+│ AI GATEWAY       │      │ experiment         │      │ :28080 HTTP vault  │
+│ the only path to │      │ agentic-blogger/   │      │ API keys, Blogger  │
+│ a provider; holds│      │ blog; langchain    │      │ OAuth, bot token,  │
+│ the keys, tracks │      │ autolog; fail-open │      │ user allowlist     │
+│ usage, enforces  │      └────────────────────┘      └────────────────────┘
+│ the budget       │
+│ (fail-CLOSED)    │      ┌────────────────────────────────────────────────┐
+└────────┬─────────┘      │ Google Blogger API v3 — posts.insert(          │
        │                  │ isDraft=True) + beacon reconcile via           │
        └── web_search_    │ posts.list(status=DRAFT)                       │
            20260209       └────────────────────────────────────────────────┘
@@ -65,7 +65,7 @@ sibling directories, not wired into this system.
 | **Telegram Bot** | `services/telegram/` → `ingestion/telegram_bot.py` | — | Long-polling. Commands `/topic /status /queue /cancel /retry /cost /models`, plus bare text = topic. Every message needs a fresh TOTP code |
 | **Orchestrator** | `services/orchestrator/` → `orchestrator/worker.py` | — | Single-replica poll loop; claims a job, runs the LangGraph pipeline |
 | **PostgreSQL** | `postgres:16-alpine` | 127.0.0.1:25432 | `app` schema (business tables) + LangGraph checkpoint tables |
-| **MLflow** | `services/mlflow/` (custom image) | 127.0.0.1:25000 | Tracking server, Postgres backend, `/mlartifacts` artifact root |
+| **MLflow** | `services/mlflow/` (custom image) | 127.0.0.1:25000 | Three roles in one process: tracking server, Prompt Registry, and **AI Gateway** — the only path from the workers to an LLM provider. Postgres backend, `/mlartifacts` artifact root, `--workers 1` |
 | **TinyDB Service** | `TinyDBService/` (submodule) | 127.0.0.1:28080 | Encrypted secrets vault over HTTP; `SecretStore` client |
 | **YoutubeService** | `YoutubeService/` (submodule) | — | Not integrated. No orchestrator code path reaches it |
 
@@ -119,7 +119,7 @@ State keys deliberately avoid the node names (`research`, `outline`,
 
 | Node | Role / Model | What it does |
 |------|--------------|--------------|
-| **research** | `search_tool` (haiku-4.5) then `research_synth` (**sonnet-5**) | Pass 1: `web_search_20260209` server tool, forced via `tool_choice`, `max_uses=12`, staff-practitioner system prompt demanding primary sources, per-tier searches, versioned claims, attributed code. Parses text + `web_search_tool_result` blocks (fail-open to empty sources), persists them via `insert_research_sources`. Pass 2: `.with_structured_output(ResearchBrief, include_raw=True)` — a server-tool call and structured output cannot share one invocation. Drops any code exemplar whose `source_url` did not survive. Falls back to `{"brief": raw}` if parsing fails |
+| **research** | `search_tool` (sonnet-5) then `research_synth` (**sonnet-5**) | Pass 1: `web_search_20260209` server tool, forced via `tool_choice`, `max_uses=12`, staff-practitioner system prompt demanding primary sources, per-tier searches, versioned claims, attributed code. Parses text + `web_search_tool_result` blocks (fail-open to empty sources), persists them via `insert_research_sources`. Pass 2: `.with_structured_output(ResearchBrief, include_raw=True)` — a server-tool call and structured output cannot share one invocation. Drops any code exemplar whose `source_url` did not survive. Falls back to `{"brief": raw}` if parsing fails |
 | **outline** | `outline` (haiku-4.5) | `Outline` structured output from topic + `brief` prose: 3 title candidates, 4–7 sections each with key points and a target tier |
 | **draft** | `draft` (opus-5, effort high → `thinking: adaptive`) | Full Markdown post, 1200–1800 words, no title heading. Persists `drafts` row at `version=0` |
 | **factcheck** | `factcheck` (opus-5, effort high) | `FactCheckReport` — every checkable claim gets `supported` / `unsupported` / `contradicted`, confidence, source URL, suggested fix. Never raises on findings |
@@ -180,9 +180,12 @@ enum but nothing sets it — the pipeline never publishes publicly.
 | `factcheck` | `anthropic:claude-opus-5` | 16000 | **high** |
 | `seo` | `anthropic:claude-haiku-4-5` | 4000 | low |
 | `script` | `anthropic:claude-haiku-4-5` | 8000 | low | *(video; unused)* |
-| `search_tool` | `anthropic:claude-haiku-4-5` | 8000 | low |
+| `search_tool` | `anthropic:claude-sonnet-5` | 16000 | low |
 
 **Fallbacks:** `opus-5 → sonnet-5`; `haiku-4-5 → ollama:qwen3.5:9b`.
+Fallback targets are registered as gateway endpoints too — a fallback that
+exists in config but not in the gateway is worse than none, since it only
+fails once the primary is already failing.
 **Providers declared:** anthropic, openai, gemini, ollama. Only anthropic and
 ollama are reachable from a role today.
 
@@ -205,8 +208,15 @@ can branch on a capability rather than a provider name. Nothing branches on it
 yet.
 
 **Secrets:** `SecretStore` (`secrets/store.py`) talks to TinyDBService over
-HTTP. `registry._ensure_api_key()` pulls the provider key and exports it as an
-env var, because the LangChain chat model classes read it from there.
+HTTP. `registry._ensure_api_key()` used to pull the provider key and export it
+as an env var for the LangChain chat classes to read; **it is now a no-op**,
+because every call goes through the AI Gateway and the workers deliberately
+hold no provider credential (§5C). `scripts/register_gateway.py` is the only
+consumer of those TinyDB entries.
+
+**Timeouts:** `defaults.timeout_s: 600` was dead config until the gateway
+landed; it is now wired into every chat model constructor. An unset client
+timeout in front of a proxy is an unbounded hang, not a slow call.
 
 ---
 
@@ -289,6 +299,81 @@ Retry predicates stay with the call site: the Blogger client must never retry
 an expired OAuth grant, and its retry deliberately re-runs the beacon reconcile
 so a timed-out-but-succeeded insert is adopted rather than double-posted.
 
+## 5C. LLM routing — MLflow AI Gateway
+
+Every LLM call leaves the worker addressed to `http://mlflow:5000/gateway`.
+There is no direct provider path and no bypass. Operator runbook:
+[AI_GATEWAY.md](AI_GATEWAY.md).
+
+**The workers hold no provider credential.** `llm/registry.py:_ensure_api_key()`
+is a no-op while the gateway is enabled, so nothing writes an API key into
+`os.environ`; clients are constructed with a placeholder key and a gateway
+`base_url`. The real keys live encrypted in the gateway's store, pushed there
+from TinyDB by `scripts/register_gateway.py`. TinyDB remains the source of
+truth; the gateway holds a copy.
+
+This is the **second fail-closed dependency** on MLflow, alongside the Prompt
+Registry (§5A). Tracing stays fail-open. The rule is unchanged — fail open on
+observability, fail closed on anything that changes what the pipeline *does* —
+and a proxy that every call passes through is squarely the latter: a bypass
+would mean spend that no budget sees and calls that no usage table records.
+Measured failure time with the gateway down: 2.2s.
+
+### Endpoint name == model id
+
+Gateway endpoints are named after model ids (`claude-opus-5`), not roles. Both
+gateway call surfaces read a request's `model` field as the *endpoint* name, so
+this convention lets the clients keep sending what they always sent — and
+`provider:model` keys and the per-node cost attribution
+in `llm/callbacks.py` keep working with `base_url` as the only change.
+
+`ollama:qwen3.5:9b` is the exception: endpoint names disallow colons, so it
+registers as `qwen3.5-9b`. `llm/gateway.py:endpoint_name()` is the single
+function that rewrites it, imported by both the registration script and the
+client construction path — the two must agree or every call 404s.
+
+### Two surfaces, one reason
+
+| Provider | Surface | Path |
+|---|---|---|
+| anthropic | passthrough | `/gateway/anthropic/v1/messages` |
+| gemini, openai, ollama | OpenAI-compatible | `/gateway/mlflow/v1/chat/completions` |
+
+Anthropic uses the passthrough because three things the pipeline depends on
+exist only in the provider-native body and would be lost to a translating
+proxy: the `web_search_20260209` / `web_fetch_20260318` **server tools** that
+are the research node, **adaptive thinking** block lists that
+`llm/text.py:extract_text` parses, and the **prompt-cache token buckets** that
+the gateway prices separately. All three verified intact through the
+gateway; `scripts/smoke_gateway.py` asserts each one so a regression is caught
+rather than silently degrading cost reporting.
+
+### Usage, cost, budget
+
+Endpoints are registered with `usage_tracking: true`, giving per-endpoint token
+/ cost / latency in the AI Gateway UI plus `gateway/<endpoint>` traces in the
+same experiment as the job runs.
+
+**The gateway is the only thing that prices a call.** No rate table, price
+catalog client, or cost formula exists in this repo any more. `llm/cost.py`
+reads the gateway's own `total_cost` back per call — filtered to its
+`provider/<provider>/<model>` span, over the call's wall-clock window — and
+`llm/callbacks.py` writes it to `node_runs.cost_usd`. The job ledger and the
+budget are therefore the same number by construction, verified against the
+gateway's budget tracker delta.
+
+This depends on two things worth knowing. The mlflow service runs with
+`MLFLOW_ENABLE_ASYNC_TRACE_LOGGING: "false"`, without which the cost row lands
+~4.7s after the response. And attribution is by time window, so it is exact
+only while the orchestrator stays a single-replica worker — see
+[AI_GATEWAY.md §5](AI_GATEWAY.md) before scaling it out.
+
+Budget policies are enforced per uvicorn worker under the default `local`
+tracker strategy, so the gateway runs `--workers 1`. That happens to coincide
+with the memory finding already recorded against the MLflow service — but they
+are independent reasons, and raising the worker count requires a Redis budget
+tracker first.
+
 ## 6. Observability
 
 `observability/mlflow_setup.py` — **fail-open by construction**: every entry
@@ -314,11 +399,66 @@ with track_llm_call(job_id, node_name, role, spec["model"]) as record:
 ```
 
 On success it reads `response.usage_metadata`, prices it via
-`llm/pricing.py` + `config/pricing.yaml`, writes a `node_runs` row and rolls
+`llm/cost.py`, writes a `node_runs` row and rolls
 the cost into `jobs`. On an exception it still writes a `node_runs` row
 carrying `error_class`/`error_message`, then re-raises.
 
 Cost is a local estimate from a static rate table, never billing truth.
+
+### 6A. Log tracing
+
+`observability/log_setup.py` is the single logging entry point for both
+service containers (`setup_logging("orchestrator")` / `setup_logging("telegram")`).
+It exists because the logs previously could not reconstruct a run: eight nodes,
+two LLM roles in places, the prompt registry, Postgres and Blogger each logged
+from their own module with no shared key, so correlation meant guessing from
+timestamps.
+
+**Correlation.** `bind_job(job_id)` and `bind_node(name)` set ContextVars; a
+handler-level `ContextFilter` stamps them onto every record, including records
+from libraries that know nothing about this application. Lines render as:
+
+```
+2026-09-09 16:41:02,118 [INFO] agentic_blogger.graph.builder [job=99639782-… node=draft]: done in 41.2s out: draft_markdown=18244ch draft_title=63ch draft_id=…
+```
+
+The binding happens **inside** the node wrapper, not around
+`compiled_graph.invoke()`: LangGraph runs sync nodes on an executor, and a
+ContextVar set on the calling thread is not guaranteed to reach the worker
+thread. The lease heartbeat thread binds its own for the same reason.
+
+**Node entry/exit** is central, in `graph/builder.py:_traced` — applied when
+each node is registered, so a node added later cannot forget it. Entry logs the
+input keys that node reads (`_INPUTS`) as sizes; exit logs elapsed time and the
+returned delta. `_traced_router` logs which branch `needs_revision` chose and
+why. Sizes rather than contents: a draft is tens of kilobytes and the signal is
+that it exists and roughly how big it got.
+
+**Redaction.** A `RedactingFilter` on the handler rewrites credential-shaped
+substrings out of every record before it is emitted — the Telegram bot token in
+a URL path (`/bot<id>:<secret>`, the numeric id is kept), `Bearer` values, and
+`key=value` pairs whose key looks secret (via `observability/scrub.py`). This is
+what allows `httpx` to run at INFO again: the per-request line is the only
+cheap evidence that a call actually left the container, and it was previously
+silenced wholesale because the token was in it. Redaction is a backstop, not a
+licence — never pass a secret to a logger on purpose.
+
+**Poll noise.** `PollNoiseFilter` drops successful Telegram `getUpdates` lines
+(~8.6k/day, all identical) and replaces them with one summary line every 30
+minutes; a poll that comes back non-2xx is still printed, as are `getMe`,
+`deleteWebhook`, `sendMessage` and every non-Telegram httpx call. The summary
+exists so a quiet bot is distinguishable from a dead one — it is produced by
+rewriting a poll record in place rather than emitting a new one, because
+logging from inside a filter reenters the handler.
+
+**Levels.** `LOG_LEVEL` (compose, default `INFO`) sets the application level.
+Library loggers are floored independently in `_LIBRARY_LEVELS`, so `LOG_LEVEL=DEBUG`
+adds prompt-resolution and payload detail without unleashing langchain/httpcore
+internals. `setup_logging` uses `basicConfig(force=True)` so a library that
+configured logging first cannot leave a second, *unfiltered* handler attached.
+
+An idle orchestrator logs one line every 5 minutes (`IDLE_LOG_EVERY_S`) —
+silence was previously indistinguishable from a dead worker.
 
 ---
 
@@ -330,6 +470,7 @@ Cost is a local estimate from a static rate table, never billing truth.
 | Command | Effect |
 |---------|--------|
 | `/topic <text>` (or bare text) | `create_topic_and_job()`; replies with the job id, or reports the existing job if the topic hash already exists |
+| `/url <link> [angle]` | Queues a URL-sourced job; `link` must be a leading http(s) URL, max 250 chars. Also reachable by pasting a bare URL as the first word of `/topic` |
 | `/status <job_id>` | State, attempt, cost so far, MLflow link, failure reason |
 | `/queue` | QUEUED + RUNNING jobs |
 | `/cancel <job_id>` | `request_cancel()` |
@@ -350,7 +491,14 @@ The decorator strips the code and normalizes both entry paths (command args vs
 bare text) back into `context.args`, so handlers parse arguments unchanged —
 `update.message` is frozen in PTB v20+ and cannot be rewritten.
 
+**Code position differs by entry path:** `CommandHandler` strips the command
+first, so a slash command reads `/topic <code> <text>`; bare text reads
+`<code> <text>`.
+
 Enrollment: `scripts/setup_telegram_totp.py`.
+
+Full command reference, setup steps, and an end-to-end test walkthrough:
+[TELEGRAM_USAGE.md](TELEGRAM_USAGE.md).
 
 ---
 
@@ -420,9 +568,6 @@ marks the publication `FAILED` and propagates as a normal failure.
 
 These exist and would work, but no caller reaches them:
 
-- `repo.heartbeat_lease()` — the worker never extends a lease mid-run. A job
-  whose graph runs longer than the 15-minute lease can be claimed concurrently
-  by a second worker. Safe only because there is exactly one replica.
 - `jobs.cancel_requested` — `/cancel` sets it; no node or loop reads it, so a
   running job finishes regardless.
 - `jobs.mlflow_run_id` — `/status` renders a link from it, but nothing ever
@@ -430,9 +575,9 @@ These exist and would work, but no caller reaches them:
   one). **The MLflow link never appears.**
 - `node_runs.mlflow_span_id` — column and parameter exist; always NULL.
   (`node_runs.prompts_json`, added in migration 0003, *is* populated.)
-- `observability/scrub.py` — full redaction helpers, imported nowhere. With
-  `mlflow.langchain.autolog()` on, prompts and responses reach MLflow
-  unredacted.
+- `observability/scrub.py` is now wired — but only into the log handler
+  (§6A). With `mlflow.langchain.autolog()` on, prompts and responses still
+  reach **MLflow** unredacted; `scrub_dict` has no caller.
 - `jobs.telegram_msg_id` — never written; no completion notification is pushed
   back to Telegram. Status is pull-only via `/status`.
 - `llm/capabilities.py` — no caller branches on it.
@@ -467,7 +612,9 @@ reconcile prevents double-posting.
 - **markdown-it-py** + **bleach** for the format node; **tenacity** for Blogger retries
 - **python-telegram-bot 21.8**; **pyotp** + **qrcode** for TOTP
 - **google-api-python-client** / **google-auth** for Blogger
-- **MLflow 2.18.0**; **TinyDB 4.8.0** behind the vault service
+- **MLflow 3.16.0** (`mlflow[genai]` — the AI Gateway's provider adapters and
+  encrypted credential store ship in that extra); **TinyDB 4.8.0** behind the
+  vault service
 - **PostgreSQL 16**, **Alembic**, Docker Compose (5 services)
 - Dev: pytest, pytest-asyncio, black, ruff (no test suite present yet)
 
@@ -480,11 +627,17 @@ reconcile prevents double-posting.
 #    Secrets live in TinyDB, not .env: ANTHROPIC_API_KEY, TELEGRAM_BOT_TOKEN,
 #    TELEGRAM_ALLOWED_USER_IDS, BLOGGER_CLIENT_ID/CLIENT_SECRET/REFRESH_TOKEN/BLOG_ID
 
+#    ./scripts/seed_secrets.sh also generates MLFLOW_CRYPTO_KEK_PASSPHRASE,
+#    which the MLflow container refuses to start without.
+
 # 2. Start
 docker compose up -d
 
 # 3. Migrate
 docker exec agentic-blogger-orchestrator alembic upgrade head
+
+# 3a. Register the AI Gateway — until this runs there is no path to a provider
+make register-gateway
 
 # 4. Enrol TOTP for your Telegram user
 python scripts/setup_telegram_totp.py
@@ -492,12 +645,14 @@ python scripts/setup_telegram_totp.py
 # 5. Authorize Blogger (writes the refresh token into TinyDB)
 python scripts/blogger_authorize.py
 
-# 6. Message the bot: "<6-digit-code> /topic What are embeddings in vector DBs?"
+# 6. Message the bot — TOTP code goes AFTER the command:
+#    "/topic <6-digit-code> What are embeddings in vector DBs?"
 docker logs -f agentic-blogger-orchestrator
 ```
 
-**Smoke scripts:** `scripts/smoke_llm.py`, `smoke_search.py`, `smoke_graph.py`,
-`smoke_mlflow.py`, `smoke_blogger.py`.
+**Smoke scripts:** `scripts/smoke_llm.py`, `smoke_gateway.py`, `smoke_search.py`,
+`smoke_graph.py`, `smoke_mlflow.py`, `smoke_blogger.py`. `make smoke` runs
+prompts, mlflow, gateway, llm, search and blogger.
 
 ---
 
@@ -513,16 +668,18 @@ docker logs -f agentic-blogger-orchestrator
 | `nodes/schemas.py` | `ResearchBrief`, `TierBrief`, `CodeExemplar`, `Outline`, `FactCheckReport`, `SeoMeta` |
 | `db/repo.py` | All SQL. Claiming, leases, ledgers, drafts, revisions, publications, TOTP state |
 | `db/engine.py` | Engine + `psycopg_url()` for the checkpointer |
-| `llm/registry.py` | Role → Runnable; effort mapping; retry + fallback wrapping |
+| `llm/registry.py` | Role → Runnable; effort mapping; gateway routing; retry + fallback wrapping |
+| `llm/gateway.py` | `endpoint_name()` — the single model-id → gateway-endpoint rule |
 | `llm/callbacks.py` | `track_llm_call` — per-call cost/latency ledger |
-| `llm/pricing.py`, `config/pricing.yaml` | Local cost estimation |
+| `llm/cost.py` | Reads each call's cost back from the AI Gateway — the only cost source; no local rate table |
 | `llm/capabilities.py` | Static provider capability table (unused) |
 | `config/loader.py`, `config/models.yaml` | Role/model/fallback config |
 | `publishing/blogger_client.py` | OAuth, beacon reconcile, tenacity retry, insert |
 | `secrets/store.py` | TinyDBService HTTP client |
 | `security/totp.py` | TOTP verify + replay consumption |
 | `observability/mlflow_setup.py` | Fail-open MLflow wiring |
-| `observability/scrub.py` | Redaction helpers (not wired) |
+| `observability/scrub.py` | Redaction helpers (wired into the log handler; not into MLflow) |
+| `observability/log_setup.py` | Logging entry point: job/node correlation, secret redaction, level policy |
 | `ingestion/telegram_bot.py` | Commands, TOTP + allowlist gate |
 | `migrations/versions/` | `0001_initial.py`, `0002_telegram_totp.py` |
 
@@ -535,9 +692,20 @@ docker logs -f agentic-blogger-orchestrator
    pick up. The claim loop in `db/repo.py` stays ours.
 2. **Fact-check advises, it does not gate.** At most one revision pass, then
    the post ships with the finding counts embedded in the HTML comment.
-3. **Fail-open on observability, fail-closed on attribution.** MLflow going
-   down never fails a job; a code exemplar without a source URL is dropped
-   before it can reach a draft.
+3. **Fail-open on observability, fail-closed on anything that changes what the
+   pipeline does.** MLflow tracing going down never fails a job. Its Prompt
+   Registry and its AI Gateway both do, because a job that ran on absent prompt
+   text or bypassed the budget is worse than a job that did not run. Separately,
+   a code exemplar without a source URL is dropped before it can reach a draft.
 4. **The beacon is the idempotency key** Blogger does not give us.
 5. **Provider swaps are config, not code** — one line in `models.yaml`, which
    is why nodes take a role name and never a model string.
+6. **The workers hold no provider credential.** Keys live encrypted in the AI
+   Gateway; TinyDB is the source of truth and `make register-gateway` pushes
+   them across. `grep -E 'ANTHROPIC|OPENAI|GEMINI'` on the orchestrator's
+   environment returning nothing is the invariant, and it is what makes "no
+   call bypasses the gateway" enforceable rather than merely intended.
+7. **Gateway endpoint names are model ids**, not role names — both call
+   surfaces resolve a request's `model` field to an endpoint, so this keeps
+   `provider:model` cost attribution working with `base_url` as the only
+   change (§5C).
