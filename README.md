@@ -1,6 +1,7 @@
 # Agentic Blogger
 
 An autonomous blog-writing pipeline that takes a topic (via Telegram), researches it with live web search, drafts a long-form post through a multi-node LangGraph pipeline, fact-checks and revises it, then publishes to Google Blogger as a draft.
+** This is part of blog :https://www.think-ai.cloud/2026/08/agentic-systems-cognitive-architecture.html
 
 ```
 Topic (Telegram)
