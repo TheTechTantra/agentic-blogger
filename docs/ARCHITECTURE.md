@@ -52,8 +52,7 @@
            (Anthropic
             server tool)
 
-Docker network: blogger-net (bridge). YoutubeService/ and blog-generator/ are
-sibling directories, not wired into this system.
+Docker network: blogger-net (bridge).
 ```
 
 ---
@@ -66,8 +65,7 @@ sibling directories, not wired into this system.
 | **Orchestrator** | `services/orchestrator/` → `orchestrator/worker.py` | — | Single-replica poll loop; claims a job, runs the LangGraph pipeline |
 | **PostgreSQL** | `postgres:16-alpine` | 127.0.0.1:25432 | `app` schema (business tables) + LangGraph checkpoint tables |
 | **MLflow** | `services/mlflow/` (custom image) | 127.0.0.1:25000 | Three roles in one process: tracking server, Prompt Registry, and **AI Gateway** — the only path from the workers to an LLM provider. Postgres backend, `/mlartifacts` artifact root, `--workers 1` |
-| **TinyDB Service** | `TinyDBService/` (submodule) | 127.0.0.1:28080 | Encrypted secrets vault over HTTP; `SecretStore` client |
-| **YoutubeService** | `YoutubeService/` (submodule) | — | Not integrated. No orchestrator code path reaches it |
+| **TinyDB Service** | `TinyDBService/` (submodule) | 127.0.0.1:28080 | Encrypted secrets vault over HTTP; `SecretStore` client. This is a custom lightweight vault — you can substitute any secret store (HashiCorp Vault, AWS Secrets Manager, etc.) by implementing the `SecretStore` interface in `secrets/store.py` |
 
 All ports bind to `127.0.0.1` only.
 
@@ -588,7 +586,7 @@ These exist and would work, but no caller reaches them:
 |------|--------|
 | **Publish live** | `posts.insert(isDraft=True)` is hardcoded; `pub_state.LIVE` is unreachable |
 | **Permalink control** | Investigating via `scripts/probe_blogger_permalink.py`. `seo_meta.slug` is generated and stored but never sent to Blogger |
-| **Video pipeline** | Four tables + `pipeline_kind` enum + `parent_job_id` + a `script` role exist; `video/` package is empty; YoutubeService is not called |
+| **Video pipeline** | Four tables + `pipeline_kind` enum + `parent_job_id` + a `script` role exist; `video/` package is empty |
 | **OpenAI / Gemini** | Providers and capability entries declared; no role targets them |
 | **Automated tests** | No `tests/` directory. `scripts/smoke_*.py` (llm, graph, search, mlflow, blogger) are the only verification path |
 | **Horizontal scaling** | One replica by design (`worker.py` docstring): the secrets-vault concurrent-write constraint plus the missing lease heartbeat |

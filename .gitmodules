@@ -1,9 +1,3 @@
 [submodule "TinyDBService"]
 	path = TinyDBService
 	url = https://github.com/TheTechTantra/TinyDBService.git
-[submodule "YoutubeService"]
-	path = YoutubeService
-	url = https://github.com/TheTechTantra/YoutubeService.git
-[submodule "blog-generator"]
-	path = blog-generator
-	url = https://github.com/TheTechTantra/blog-generator.git
