@@ -2,6 +2,7 @@
 
 *Part 8 of the [Agentic Blogger series](README.md).*
 
+**This is not implemented in the codebase**
 Posts 1–7 describe a fixed graph with agentic nodes: eight nodes in a known
 order, one conditional edge, agency scoped to tool use and structured output.
 This post is the transition to a **true agentic system** — one where the model
